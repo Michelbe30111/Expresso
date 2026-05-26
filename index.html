@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>Analyseur Expresso ECAM v3</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0} body{font-family:'Segoe UI',Arial,sans-serif;background:#1a1a1a;color:#eee;min-height:100vh;padding:16px} h2{font-size:1.3rem;margin-bottom:16px;color:#c8a97e}.card{background:#252525;border-radius:14px;padding:18px;margin-bottom:14px;box-shadow:0 4px 16px rgba(0,0,0,.4)} #btnRec{width:100%;padding:22px;font-size:1.2rem;font-weight:700;border:none;border-radius:12px;cursor:pointer;background:#c0392b;color:#fff}.actions{display:flex;gap:10px;margin-top:14px;flex-wrap:wrap}.btn{flex:1;min-width:120px;padding:12px;border:none;border-radius:10px;font-size:.95rem;font-weight:600;cursor:pointer;background:#333;color:#eee} table{width:100%;border-collapse:collapse;margin-top:10px;font-size:.92rem} th{background:#333;color:#c8a97e;padding:8px 6px;text-align:left} td{padding:8px 6px;border-bottom:1px solid #333}.dur{font-weight:700;color:#f1c40f;text-align:right} #commentaire{width:100%;padding:10px;background:#1a1a1a;border:1px solid #444;border-radius:8px;color:#eee;margin-top:10px}
+</style>
+</head>
+<body>
+<div class="card">
+<h2>☕ Analyseur Expresso ECAM</h2>
+<button id="btnRec" onclick="toggleRec()">⏺ Démarrer l'enregistrement</button>
+<div class="actions">
+<button class="btn" onclick="document.getElementById('filePick').click()">📂 Choisir un fichier audio</button>
+<button class="btn" onclick="showHistory()">🕘 Historique</button>
+<input id="filePick" type="file" accept="audio/*,.m4a,.mp3,.wav" style="display:none">
+</div>
+<div id="status" style="margin-top:12px">Prêt</div>
+<div id="historyBox" style="display:none;margin-top:10px"></div>
+</div>
+<div class="card" id="resultCard" style="display:none">
+<h2>📊 Résultats</h2>
+<table><thead><tr><th>Phase</th><th>Début</th><th>Fin</th><th>Durée</th></tr></thead><tbody id="rows"></tbody></table>
+<textarea id="commentaire" rows="2" placeholder="Commentaire"></textarea>
+<div class="actions"><button class="btn" onclick="copyExcel()">📋 Copier Excel</button><button class="btn" onclick="exportCSV()">⬇ CSV</button><button class="btn" onclick="resetAll()">🔄 Nouveau</button></div>
+</div>
+<script>
+let mediaRecorder=null,audioChunks=[],recording=false,stream=null,current=[],currentFile='enregistrement';
+const statusEl=document.getElementById('status');
+function fr(n){return Number(n).toFixed(1).replace('.',',');}
+function setStatus(m){statusEl.textContent=m;}
+function getBestMime(){const c=['audio/webm;codecs=opus','audio/webm','']; for(const m of c){if(!m||MediaRecorder.isTypeSupported(m)) return m;} return '';}
+async function toggleRec(){recording?stopRec():await startRec();}
+async function startRec(){try{stream=await navigator.mediaDevices.getUserMedia({audio:{channelCount:1,echoCancellation:false,noiseSuppression:false,autoGainControl:false}});}catch(e){setStatus('Micro refusé');return;} audioChunks=[]; const mime=getBestMime(); mediaRecorder=new MediaRecorder(stream,mime?{mimeType:mime}:undefined); mediaRecorder.ondataavailable=e=>{if(e.data.size)audioChunks.push(e.data)}; mediaRecorder.onstop=()=>analyseBlob(new Blob(audioChunks,{type:mediaRecorder.mimeType||'audio/webm'})); mediaRecorder.start(200); recording=true; setStatus('Enregistrement...'); document.getElementById('btnRec').textContent='⏹ Arrêter';}
+function stopRec(){if(mediaRecorder&&mediaRecorder.state!=='inactive') mediaRecorder.stop(); if(stream) stream.getTracks().forEach(t=>t.stop()); recording=false; document.getElementById('btnRec').textContent='⏺ Démarrer'; setStatus('Analyse...');}
+async function analyseBlob(blob){try{const ctx=new (window.AudioContext||window.webkitAudioContext)(); const decoded=await ctx.decodeAudioData(await blob.arrayBuffer()); const data=decoded.getChannelData(0), sr=decoded.sampleRate, winSec=0.1, win=Math.floor(sr*winSec); let rms=[]; for(let i=0;i<data.length;i+=win){let s=0,c=0; for(let j=i;j<i+win&&j<data.length;j++){s+=data[j]*data[j];c++;} rms.push(c?Math.sqrt(s/c):0);} const max=Math.max(...rms)||1; let norm=rms.map(v=>v/max); let raw=[],active=false,start=0; for(let i=0;i<norm.length;i++){if(!active&&norm[i]>0.045){active=true;start=i*winSec;} if(active&&norm[i]<=0.06){raw.push({start,end:i*winSec}); active=false;}} if(active) raw.push({start,end:norm.length*winSec}); let blocks=merge(raw,0.35).filter(b=>(b.end-b.start)>=1); if(blocks.length<5&&blocks.length){const cs=blocks[0].start, ce=blocks[blocks.length-1].end,total=ce-cs,rat=[0.20,0.13,0.06,0.46,0.15]; let pos=cs; blocks=rat.map(r=>{const b={start:pos,end:pos+total*r}; pos=b.end; return b;});} else blocks=blocks.slice(0,5); const names=['Broyage','Compactage','Pré-extraction','Extraction','Éjection']; current=blocks.map((b,i)=>({phase:names[i],start:b.start,end:b.end,dur:b.end-b.start})); saveHistory(); render(); setStatus('Analyse terminée');}catch(e){setStatus('Erreur analyse');}}
+function merge(blocks,g){if(!blocks.length)return[]; let o=[blocks[0]]; for(let i=1;i<blocks.length;i++){let p=o[o.length-1]; if(blocks[i].start-p.end<=g)p.end=blocks[i].end; else o.push(blocks[i]);} return o;}
+function render(){rows.innerHTML=''; current.forEach(r=>rows.innerHTML+=`<tr><td>${r.phase}</td><td>${fr(r.start)}</td><td>${fr(r.end)}</td><td class='dur'>${fr(r.dur)}</td></tr>`); resultCard.style.display='block';}
+filePick.onchange=()=>{if(filePick.files[0]){currentFile=filePick.files[0].name; analyseBlob(filePick.files[0]);}};
+function copyExcel(){const c=commentaire.value||''; const txt='Fichier\tCommentaire\tBroyage\tCompactage\tPré-extraction\tExtraction\tÉjection\n'+currentFile+'\t'+c+'\t'+current.map(r=>fr(r.dur)).join('\t'); navigator.clipboard?.writeText(txt); setStatus('Copié');}
+function exportCSV(){const csv='Phase;Début;Fin;Durée\n'+current.map(r=>`${r.phase};${fr(r.start)};${fr(r.end)};${fr(r.dur)}`).join('\n'); const a=document.createElement('a'); a.href=URL.createObjectURL(new Blob(['\uFEFF'+csv],{type:'text/csv'})); a.download='analyse_expresso.csv'; a.click();}
+function saveHistory(){const h=JSON.parse(localStorage.getItem('expressoHist')||'[]'); h.unshift({d:new Date().toLocaleString('fr-FR'),f:currentFile}); localStorage.setItem('expressoHist',JSON.stringify(h.slice(0,20)));}
+function showHistory(){const h=JSON.parse(localStorage.getItem('expressoHist')||'[]'); historyBox.innerHTML=h.length?h.map(x=>`<div>${x.d} - ${x.f}</div>`).join(''):'Aucun historique'; historyBox.style.display='block';}
+function resetAll(){current=[]; resultCard.style.display='none'; setStatus('Prêt');}
+</script></body></html>
