@@ -1,0 +1,142 @@
+
+<!DOCTYPE html><html lang="fr"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Analyseur Expresso ECAM V5.0</title>
+<style>
+body{font-family:Arial,sans-serif;background:#121212;color:#eee;margin:0;padding:12px} .card{background:#222;padding:12px;border-radius:14px;margin-bottom:12px}
+button{padding:10px;border:none;border-radius:10px;background:#444;color:#fff;cursor:pointer;margin:4px}
+#btnRec{background:#b71c1c;font-weight:bold} canvas{width:100%;background:#000;border-radius:10px} table{width:100%;border-collapse:collapse} th,td{border-bottom:1px solid #444;padding:6px;font-size:12px}
+textarea,input{width:100%;background:#111;color:#eee;border:1px solid #444;border-radius:8px;padding:8px}
+.actions{display:flex;flex-wrap:wrap}
+.small{font-size:12px;color:#bbb}
+</style></head><body>
+<div class="card">
+<h2>☕ Analyseur Expresso ECAM V5.0</h2>
+<button id="btnRec">⏺ Enregistrement live micro Android/PC</button><div id='timer' style='font-size:32px;font-weight:bold;text-align:center;color:#fff;background:#000;padding:10px;border-radius:12px'>00:00</div>
+<input id="filePick" type="file" accept="audio/*,.m4a,.mp3,.wav">
+<div class="actions">
+<button onclick="resetAnalysis()">Reset / nouvelle analyse</button>
+<button onclick="clearHistory()">Vider historique</button>
+</div>
+<div id="status">Prêt</div>
+</div>
+
+<div class="card">
+<h3>Waveform coloré par phase</h3>
+<canvas id="wave" width="1200" height="260"></canvas>
+</div>
+
+<div class="card">
+<h3>Analyse ECAM 5 phases</h3>
+<table><thead><tr><th>Phase</th><th>Durée</th></tr></thead><tbody id="rows"></tbody></table>
+<div id="avgBox" class="small"></div>
+
+<div class="actions">
+<button onclick="copyExcel()">Copier Excel</button>
+<button onclick="exportCSV()">Export CSV</button>
+</div>
+</div>
+
+
+
+<script>
+let mediaRecorder, chunks=[], current=[], currentFile='micro', waveform=[], liveStream=null, animId=null, timerInt=null, recStart=0, commentaireValeur='';
+const phases=['Broyage','Compactage','Pré-extraction','Extraction','Éjection'];
+const colors=['#e53935','#fb8c00','#fdd835','#43a047','#1e88e5'];
+btnRec.onclick=async()=> {
+ if(mediaRecorder && mediaRecorder.state==='recording'){cancelAnimationFrame(animId); clearInterval(timerInt); mediaRecorder.stop(); timer.textContent='00:00'; return;}
+ let stream=await navigator.mediaDevices.getUserMedia({audio:true});
+ mediaRecorder=new MediaRecorder(stream);
+ chunks=[]; mediaRecorder.ondataavailable=e=>chunks.push(e.data);
+ mediaRecorder.onstop=()=>analyze(new Blob(chunks));
+ liveStream=stream;
+ const src=new AudioContext(); const analyser=src.createAnalyser(); analyser.fftSize=2048; src.createMediaStreamSource(stream).connect(analyser);
+ function liveDraw(){
+   let arr=new Uint8Array(analyser.fftSize); analyser.getByteTimeDomainData(arr);
+   waveform=Array.from(arr).map(v=>Math.abs((v-128)/128));
+   renderWave(); animId=requestAnimationFrame(liveDraw);
+ }
+ liveDraw();
+ recStart=Date.now();
+ timerInt=setInterval(()=>{let s=Math.floor((Date.now()-recStart)/1000); timer.textContent=String(Math.floor(s/60)).padStart(2,'0')+':'+String(s%60).padStart(2,'0');},1000);
+ mediaRecorder.start(200); status.textContent='Enregistrement...'; btnRec.textContent='⏹ Arrêter';
+};
+filePick.onchange=()=>{if(filePick.files[0]){currentFile=filePick.files[0].name; analyze(filePick.files[0]);}};
+async function analyze(blob){
+ status.textContent='Analyse...'; btnRec.textContent='⏺ Enregistrement live micro Android/PC';
+ const ctx=new (window.AudioContext||window.webkitAudioContext)();
+ const buf=await ctx.decodeAudioData(await blob.arrayBuffer());
+ const data=buf.getChannelData(0); const step=Math.max(1,Math.floor(data.length/1200));
+ waveform=[]; for(let i=0;i<data.length;i+=step){waveform.push(Math.abs(data[i]||0));}
+ const data=buf.getChannelData(0);
+ const sr=buf.sampleRate, win=Math.floor(sr*0.12);
+ let env=[];
+ for(let i=0;i<data.length;i+=win){
+   let s=0,c=0;
+   for(let j=i;j<i+win && j<data.length;j++){s+=data[j]*data[j];c++;}
+   env.push(Math.sqrt(s/c));
+ }
+ let mx=Math.max(...env)||1;
+ env=env.map(v=>v/mx);
+ let smooth=env.map((v,i)=>{let a=env[i-1]||v,b=env[i+1]||v; return (a+v+b)/3;});
+ let segments=[], active=false, st=0;
+ for(let i=0;i<smooth.length;i++){
+   if(!active && smooth[i]>0.08){active=true; st=i*0.12;}
+   if(active && smooth[i]<0.05){segments.push([st,i*0.12]); active=false;}
+ }
+ if(active) segments.push([st,buf.duration]);
+ let start=segments.length?segments[0][0]:0;
+ let end=segments.length?segments[segments.length-1][1]:buf.duration;
+ let total=end-start;
+ let cuts=[0.18,0.34,0.44,0.88,1.0];
+ let prev=start;
+ current=cuts.map((c,i)=>{let e=start+total*c; let o={phase:phases[i],dur:+(e-prev).toFixed(1),start:prev,end:e}; prev=e; return o;});
+ renderWave(); renderTable(); let c=prompt('Commentaire pour cette analyse ?')||''; commentaireValeur=c; saveHistory(); renderHistory(); renderLast();
+ status.textContent='Analyse OK';
+}
+function renderWave(){
+ let c=wave.getContext('2d'); c.clearRect(0,0,wave.width,wave.height);
+ if(!waveform.length) return;
+ let total=waveform.length, phaseCuts=[0.2,0.33,0.39,0.85,1], p=0;
+ for(let i=0;i<total;i++){
+   while(i/total>phaseCuts[p] && p<4)p++;
+   c.strokeStyle=colors[p];
+   let h=waveform[i]*120; c.beginPath(); c.moveTo(i,130-h); c.lineTo(i,130+h); c.stroke();
+ }
+}
+function renderTable(){ rows.innerHTML=current.map(x=>`<tr><td>${x.phase}</td><td>${x.dur}s</td></tr>`).join('');}
+function hist(){ return JSON.parse(localStorage.getItem('ecamV42')||'[]');}
+function saveHistory(){ let h=hist(); h.unshift({date:new Date().toLocaleString('fr-FR'), file:currentFile, comment:commentaireValeur, current}); localStorage.setItem('ecamV42', JSON.stringify(h.slice(0,100))); }
+function renderHistory(){
+ hist().forEach;
+ histDiv=hist().map((x,i)=>`<div>${x.date} ${x.file} (${sum(x.current)}s) ${x.comment||''}
+ <button onclick="loadHist(${i})">Charger ancienne analyse</button>
+ <button onclick="delHist(${i})">Supprimer entrée</button></div>`).join('');
+ document.getElementById('hist').innerHTML=histDiv;
+}
+function renderLast(){
+ let h=hist().slice(0,10);
+ document.getElementById('last').innerHTML=h.map(x=>`<tr><td>${x.date.split(' ')[0]}</td><td>${x.current[0]?.dur||0}</td><td>${x.current[1]?.dur||0}</td><td>${x.current[2]?.dur||0}</td><td>${x.current[3]?.dur||0}</td><td>${x.current[4]?.dur||0}</td><td>${sum(x.current)}s</td><td>${x.comment||''}</td></tr>`).join('');
+ if(h.length){
+  let avg=(h.reduce((a,x)=>a+sum(x.current),0)/h.length).toFixed(1);
+  avgBox.textContent='Moyenne total: '+avg+' s';
+ }
+}
+function sum(arr){return arr.reduce((a,b)=>a+b.dur,0).toFixed(1);}
+function loadHist(i){ let x=hist()[i]; if(!x)return; current=x.current; commentaireValeur=x.comment||''; renderTable();}
+function delHist(i){ let h=hist(); h.splice(i,1); localStorage.setItem('ecamV42', JSON.stringify(h)); renderHistory(); renderLast();}
+function clearHistory(){ localStorage.removeItem('ecamV42'); renderHistory(); renderLast();}
+function copyExcel(){ let txt='Phase\tDurée\n'+current.map(x=>x.phase+'\t'+x.dur).join('\n'); navigator.clipboard.writeText(txt);}
+function exportCSV(){ let csv='Phase;Durée\n'+current.map(x=>x.phase+';'+x.dur).join('\n'); let a=document.createElement('a'); a.href=URL.createObjectURL(new Blob([csv])); a.download='ecam_v42.csv'; a.click();}
+function resetAnalysis(){ current=[]; waveform=[]; renderWave(); rows.innerHTML=''; commentaire.value=''; status.textContent='Prêt';}
+renderHistory(); renderLast();
+</script>
+</div>
+
+<div class="card">
+<h3>10 dernières mesures</h3>
+<table><thead><tr><th>Date</th><th>Total</th><th>Commentaire</th></tr></thead><tbody id="last"></tbody></table>
+</div>
+<div class="card">
+<h3>Historique détaillé persistant</h3>
+<div id="hist"></div>
+</body></html>
