@@ -1,0 +1,545 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Analyseur Expresso ECAM V5.1</title>
+<style>
+*{box-sizing:border-box}
+body{font-family:Arial,sans-serif;background:#121212;color:#eee;margin:0;padding:12px}
+.card{background:#222;padding:14px;border-radius:14px;margin-bottom:12px}
+h2{font-size:1.2rem;margin:0 0 10px;color:#c8a97e}
+h3{font-size:1rem;margin:0 0 10px;color:#c8a97e}
+button{padding:10px 14px;border:none;border-radius:10px;background:#444;color:#fff;cursor:pointer;margin:4px;font-size:.9rem}
+button:hover{background:#555}
+#btnRec{background:#b71c1c;font-weight:bold;width:100%;padding:16px;font-size:1.05rem}
+#filePick{display:none}
+canvas{width:100%;background:#111;border-radius:10px;display:block}
+table{width:100%;border-collapse:collapse}
+th,td{border-bottom:1px solid #333;padding:7px 6px;font-size:12px}
+th{color:#c8a97e;background:#1a1a1a}
+td.dur{font-weight:700;color:#f1c40f;text-align:right}
+td.start,td.end{color:#aaa;text-align:right}
+textarea{width:100%;background:#111;color:#eee;border:1px solid #444;border-radius:8px;padding:8px;margin-top:8px;font-size:.9rem}
+.actions{display:flex;flex-wrap:wrap;gap:4px;margin-top:8px}
+.small{font-size:12px;color:#aaa;margin-top:6px}
+.hist-entry{border-bottom:1px solid #333;padding:8px 0;font-size:12px;color:#ccc}
+.hist-entry button{font-size:11px;padding:5px 8px;background:#333}
+label{font-size:12px;color:#aaa}
+input[type=range]{width:100%;accent-color:#c8a97e;margin:4px 0}
+.seuils-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px 20px;margin-top:6px}
+#status{margin-top:10px;font-size:.9rem;color:#aaa}
+.badge{display:inline-block;padding:2px 7px;border-radius:6px;font-size:11px;color:#fff;margin-right:4px}
+</style>
+</head>
+<body>
+
+<!-- CONTRÔLES -->
+<div class="card">
+  <h2>☕ Analyseur Expresso ECAM V5.1</h2>
+  <button id="btnRec">⏺ Enregistrement live micro</button>
+  <div class="actions">
+    <button onclick="document.getElementById('filePick').click()">📂 Fichier audio</button>
+    <input id="filePick" type="file" accept="audio/*,.m4a,.mp3,.wav">
+    <button onclick="resetAnalysis()">🔄 Reset</button>
+    <button onclick="clearHistory()">🗑 Vider historique</button>
+  </div>
+  <div id="status">Prêt</div>
+</div>
+
+<!-- SEUILS RMS -->
+<div class="card">
+  <h3>⚙️ Seuils de détection RMS</h3>
+  <div class="seuils-grid">
+    <div>
+      <label>Seuil montée : <strong id="lblUp">0.045</strong></label>
+      <input type="range" id="sUp" min="0.01" max="0.15" step="0.005" value="0.045" oninput="lblUp.textContent=parseFloat(this.value).toFixed(3)">
+    </div>
+    <div>
+      <label>Seuil descente : <strong id="lblDown">0.060</strong></label>
+      <input type="range" id="sDown" min="0.01" max="0.15" step="0.005" value="0.060" oninput="lblDown.textContent=parseFloat(this.value).toFixed(3)">
+    </div>
+    <div>
+      <label>Gap fusion (s) : <strong id="lblGap">0.35</strong></label>
+      <input type="range" id="sGap" min="0.05" max="1.5" step="0.05" value="0.35" oninput="lblGap.textContent=parseFloat(this.value).toFixed(2)">
+    </div>
+    <div>
+      <label>Durée min bloc (s) : <strong id="lblMin">1.0</strong></label>
+      <input type="range" id="sMin" min="0.2" max="3.0" step="0.1" value="1.0" oninput="lblMin.textContent=parseFloat(this.value).toFixed(1)">
+    </div>
+    <div>
+      <label>Plancher RMS (dB) : <strong id="lblFloor">-40</strong></label>
+      <input type="range" id="sFloor" min="-60" max="-10" step="5" value="-40" oninput="lblFloor.textContent=this.value;renderWave()">
+    </div>
+  </div>
+  <div class="actions">
+    <button onclick="reanalyze()">🔁 Ré-analyser avec ces seuils</button>
+  </div>
+</div>
+
+<!-- WAVEFORM -->
+<div class="card">
+  <h3>Waveform coloré par phase</h3>
+  <div style="position:relative">
+    <canvas id="wave" width="1200" height="220"></canvas>
+    <canvas id="rmsOverlay" width="1200" height="220" style="position:absolute;top:0;left:0;width:100%;border-radius:10px;pointer-events:none"></canvas>
+  </div>
+  <div style="margin-top:6px;display:flex;align-items:center;gap:12px;flex-wrap:wrap">
+    <div id="legendBox" style="font-size:11px;flex:1"></div>
+    <label style="font-size:12px;display:flex;align-items:center;gap:6px;cursor:pointer">
+      <input type="checkbox" id="chkRms" checked onchange="renderWave()"> Courbe RMS + seuils
+    </label>
+  </div>
+  <div id="blocInfo" style="font-size:12px;color:#aaa;margin-top:4px"></div>
+</div>
+
+<!-- RÉSULTATS -->
+<div class="card">
+  <h3>Analyse ECAM — 5 phases</h3>
+  <table>
+    <thead><tr><th>Phase</th><th style="text-align:right">Début</th><th style="text-align:right">Fin</th><th style="text-align:right">Durée</th></tr></thead>
+    <tbody id="rows"></tbody>
+  </table>
+  <div id="avgBox" class="small"></div>
+  <textarea id="commentaire" rows="2" placeholder="Commentaire (facultatif)"></textarea>
+  <div class="actions">
+    <button onclick="saveAndUpdate()">💾 Sauvegarder</button>
+    <button onclick="copyExcel()">📋 Copier Excel</button>
+    <button onclick="exportCSV()">⬇ Export CSV</button>
+  </div>
+</div>
+
+<!-- HISTORIQUE DÉTAILLÉ -->
+<div class="card">
+  <h3>Historique détaillé</h3>
+  <div id="hist"></div>
+</div>
+
+<!-- 10 DERNIÈRES -->
+<div class="card">
+  <h3>10 dernières mesures</h3>
+  <table>
+    <thead><tr><th>Date</th><th>Fichier</th><th style="text-align:right">Total</th><th>Commentaire</th></tr></thead>
+    <tbody id="last"></tbody>
+  </table>
+</div>
+
+<script>
+// ── État global ──
+let mediaRecorder, recChunks=[], recording=false, recStream=null;
+let current=[], currentFile='micro', waveform=[], rmsData=[], rmsNorm=[], sampleRate=1, lastBlob=null;
+
+const phases=['Broyage','Compactage','Pré-extraction','Extraction','Éjection'];
+const colors=['#e53935','#fb8c00','#fdd835','#43a047','#1e88e5'];
+
+// ── Enregistrement micro ──
+document.getElementById('btnRec').onclick = async () => {
+  if(recording){ stopRec(); return; }
+  try{
+    recStream = await navigator.mediaDevices.getUserMedia({audio:{channelCount:1,echoCancellation:false,noiseSuppression:false,autoGainControl:false}});
+  }catch(e){ setStatus('Micro refusé : '+e.message); return; }
+  recChunks=[];
+  const mime = ['audio/webm;codecs=opus','audio/webm',''].find(m=>!m||MediaRecorder.isTypeSupported(m));
+  mediaRecorder = new MediaRecorder(recStream, mime?{mimeType:mime}:undefined);
+  mediaRecorder.ondataavailable = e=>{ if(e.data.size) recChunks.push(e.data); };
+  mediaRecorder.onstop = ()=>{ lastBlob=new Blob(recChunks,{type:mediaRecorder.mimeType||'audio/webm'}); analyze(lastBlob); };
+  mediaRecorder.start(200);
+  recording=true;
+  setStatus('Enregistrement…');
+  document.getElementById('btnRec').textContent='⏹ Arrêter';
+};
+
+function stopRec(){
+  if(mediaRecorder && mediaRecorder.state!=='inactive') mediaRecorder.stop();
+  if(recStream) recStream.getTracks().forEach(t=>t.stop());
+  recording=false;
+  document.getElementById('btnRec').textContent='⏺ Enregistrement live micro';
+  setStatus('Analyse…');
+}
+
+// ── Fichier audio ──
+document.getElementById('filePick').onchange = () => {
+  const f=document.getElementById('filePick').files[0];
+  if(f){ currentFile=f.name; lastBlob=f; analyze(f); }
+};
+
+// ── Analyse principale ──
+async function analyze(blob){
+  setStatus('Analyse…');
+  try{
+    const actx = new (window.AudioContext||window.webkitAudioContext)();
+    const decoded = await actx.decodeAudioData(await blob.arrayBuffer());
+    const data = decoded.getChannelData(0);
+    sampleRate = decoded.sampleRate;
+    const winSec=0.1, win=Math.floor(sampleRate*winSec);
+
+    // RMS par fenêtre de 100ms
+    rmsData=[];
+    for(let i=0;i<data.length;i+=win){
+      let s=0,c=0;
+      for(let j=i;j<i+win&&j<data.length;j++){s+=data[j]*data[j];c++;}
+      rmsData.push(c?Math.sqrt(s/c):0);
+    }
+    const maxR=Math.max(...rmsData)||1;
+    rmsNorm=rmsData.map(v=>v/maxR);
+
+    // Waveform pour affichage (1200 points)
+    const step=Math.max(1,Math.floor(data.length/1200));
+    waveform=[];
+    for(let i=0;i<data.length;i+=step) waveform.push(Math.abs(data[i]||0));
+
+    detectPhases(rmsNorm, winSec);
+  }catch(e){ setStatus('Erreur : '+e.message); }
+}
+
+function detectPhases(norm, winSec){
+  const tUp   = parseFloat(document.getElementById('sUp').value);
+  const tDown = parseFloat(document.getElementById('sDown').value);
+  const gap   = parseFloat(document.getElementById('sGap').value);
+  const minDur= parseFloat(document.getElementById('sMin').value);
+
+  // Détection blocs actifs
+  let raw=[], active=false, start=0;
+  for(let i=0;i<norm.length;i++){
+    if(!active && norm[i]>tUp){ active=true; start=i*winSec; }
+    if(active && norm[i]<=tDown){ raw.push({start,end:i*winSec}); active=false; }
+  }
+  if(active) raw.push({start,end:norm.length*winSec});
+
+  // Fusion des blocs proches
+  let blocks = merge(raw, gap).filter(b=>(b.end-b.start)>=minDur);
+
+  const nBlocs = blocks.length;
+  document.getElementById('blocInfo').textContent =
+    `Blocs détectés : ${raw.length} bruts → ${nBlocs} après fusion/filtre (besoin de 5)`;
+
+  if(blocks.length>=5){
+    blocks=blocks.slice(0,5);
+  } else if(blocks.length>0){
+    // Fallback proportionnel sur la zone active détectée
+    const cs=blocks[0].start, ce=blocks[blocks.length-1].end, total=ce-cs;
+    const rat=[0.20,0.13,0.06,0.46,0.15];
+    let pos=cs;
+    blocks=rat.map(r=>({start:pos, end:(pos+=total*r)}));
+    setStatus('⚠️ Analyse (fallback proportionnel — ajuster les seuils)');
+  } else {
+    setStatus('⚠️ Aucun signal détecté — baisser le seuil montée');
+    return;
+  }
+
+  current = blocks.map((b,i)=>({phase:phases[i], start:+b.start.toFixed(2), end:+b.end.toFixed(2), dur:+(b.end-b.start).toFixed(2)}));
+  renderWave();
+  renderTable();
+  renderHistory();
+  renderLast();
+  if(!/fallback|Aucun/.test(document.getElementById('status').textContent))
+    setStatus('✅ Analyse OK');
+}
+
+function merge(blocks,g){
+  if(!blocks.length) return[];
+  let o=[{...blocks[0]}];
+  for(let i=1;i<blocks.length;i++){
+    let p=o[o.length-1];
+    if(blocks[i].start-p.end<=g) p.end=blocks[i].end;
+    else o.push({...blocks[i]});
+  }
+  return o;
+}
+
+function reanalyze(){
+  if(!lastBlob && !rmsNorm.length){ setStatus('Charger un fichier d\'abord'); return; }
+  if(rmsNorm.length){ detectPhases(rmsNorm, 0.1); }
+  else analyze(lastBlob);
+}
+
+// ── Waveform ──
+function renderWave(){
+  const cv=document.getElementById('wave');
+  const W=cv.width, H=cv.height, mid=H/2;
+  const c=cv.getContext('2d');
+  c.clearRect(0,0,W,H);
+
+  const ov=document.getElementById('rmsOverlay');
+  const oc=ov.getContext('2d');
+  oc.clearRect(0,0,W,H);
+
+  if(!waveform.length) return;
+
+  // Durée totale de l'audio (en secondes) = rmsData.length * 0.1s
+  const audioDur = rmsData.length * 0.1;
+
+  // ── 1. Waveform coloré par phase ──
+  const total=waveform.length;
+  for(let i=0;i<total;i++){
+    const t=(i/total)*audioDur;
+    let col='#444';
+    if(current.length){
+      for(let p=0;p<current.length;p++){
+        if(t>=current[p].start && t<current[p].end){ col=colors[p]; break; }
+      }
+    }
+    c.strokeStyle=col;
+    const h=waveform[i]*95;
+    c.beginPath(); c.moveTo(i,mid-h); c.lineTo(i,mid+h); c.stroke();
+  }
+
+  // ── 2. Lignes de séparation de phases ──
+  if(current.length){
+    current.forEach((ph,i)=>{
+      if(i===0) return;
+      const x=Math.round((ph.start/audioDur)*W);
+      c.strokeStyle='rgba(255,255,255,0.25)';
+      c.lineWidth=1;
+      c.setLineDash([4,4]);
+      c.beginPath(); c.moveTo(x,0); c.lineTo(x,H); c.stroke();
+      c.setLineDash([]);
+      c.lineWidth=1;
+    });
+  }
+
+  // ── 3. Courbe RMS + seuils (overlay) ──
+  if(!document.getElementById('chkRms').checked) {
+    updateLegend(); return;
+  }
+
+  const tUp   = parseFloat(document.getElementById('sUp').value);
+  const tDown = parseFloat(document.getElementById('sDown').value);
+  const nLen  = rmsNorm.length;
+
+  // ── Échelle logarithmique ──
+  // On mappe RMS linéaire → dB normalisé, puis dB → Y pixel
+  // dBmin = plancher (silences), dBmax = 0 dB (max signal)
+  const EPS    = 1e-6;
+  const dBmin  = parseFloat(document.getElementById('sFloor').value);
+  function toDb(v){ return 20*Math.log10(Math.max(v, EPS)); }
+  // toDb(1.0) = 0, toDb(EPS) = -120
+
+  // Zone RMS : bande du bas, hauteur = H * 0.45
+  // Y=rmsTop → dBmin (silence, bas de la courbe)
+  // Y=rmsBot → dBmax=0 dB (son fort, haut de la courbe)
+  const rmsBot = H - 2;          // bas de la zone (Y max en pixels = valeur basse)
+  const rmsH   = Math.round(H * 0.45);
+  const rmsTop = rmsBot - rmsH;  // haut de la zone (Y min en pixels = valeur forte)
+
+  // Conversion dB → Y pixel dans la zone RMS
+  // dBmax (0 dB) → rmsTop   (haut, son fort)
+  // dBmin (-40)  → rmsBot   (bas, silence)
+  function dbToY(db){
+    const t = Math.max(0, Math.min(1, (db - dBmin) / (0 - dBmin)));
+    return rmsBot - t * rmsH;
+  }
+
+  // Fond de la zone RMS
+  oc.fillStyle='rgba(255,255,255,0.03)';
+  oc.fillRect(0, rmsTop, W, rmsH+2);
+
+  // Grille dB horizontale (lignes de référence)
+  oc.font='9px Arial';
+  [-10, -20, -30].forEach(db=>{
+    const y=dbToY(db);
+    oc.strokeStyle='rgba(255,255,255,0.08)';
+    oc.lineWidth=1; oc.setLineDash([]);
+    oc.beginPath(); oc.moveTo(0,y); oc.lineTo(W,y); oc.stroke();
+    oc.fillStyle='rgba(180,180,180,0.5)';
+    oc.fillText(db+'dB', W-32, y-2);
+  });
+
+  // Courbe RMS en dB
+  oc.beginPath();
+  oc.strokeStyle='rgba(200,200,200,0.75)';
+  oc.lineWidth=1.5;
+  for(let i=0;i<nLen;i++){
+    const x=(i/nLen)*W;
+    const y=dbToY(toDb(rmsNorm[i]));
+    i===0 ? oc.moveTo(x,y) : oc.lineTo(x,y);
+  }
+  oc.stroke();
+
+  // Remplissage sous la courbe
+  oc.lineTo(W, rmsBot); oc.lineTo(0, rmsBot);
+  oc.closePath();
+  oc.fillStyle='rgba(180,180,180,0.07)';
+  oc.fill();
+
+  // Ligne de base (silence)
+  oc.strokeStyle='rgba(255,255,255,0.12)';
+  oc.lineWidth=1;
+  oc.beginPath(); oc.moveTo(0,rmsBot); oc.lineTo(W,rmsBot); oc.stroke();
+
+  // ── Seuil montée (cyan) ──
+  const yUp = dbToY(toDb(tUp));
+  oc.strokeStyle='rgba(0,220,220,0.9)';
+  oc.lineWidth=1.8;
+  oc.setLineDash([8,4]);
+  oc.beginPath(); oc.moveTo(0,yUp); oc.lineTo(W,yUp); oc.stroke();
+  oc.setLineDash([]);
+  oc.font='bold 11px Arial';
+  const lbUp='▲ montée '+tUp.toFixed(3)+' ('+toDb(tUp).toFixed(1)+'dB)';
+  const wUp=oc.measureText(lbUp).width+8;
+  oc.fillStyle='rgba(0,35,35,0.82)'; oc.fillRect(4, yUp-17, wUp, 15);
+  oc.fillStyle='rgba(0,230,230,1)';  oc.fillText(lbUp, 7, yUp-5);
+
+  // ── Seuil descente (orange) ──
+  const yDown = dbToY(toDb(tDown));
+  oc.strokeStyle='rgba(255,160,0,0.9)';
+  oc.lineWidth=1.8;
+  oc.setLineDash([8,4]);
+  oc.beginPath(); oc.moveTo(0,yDown); oc.lineTo(W,yDown); oc.stroke();
+  oc.setLineDash([]);
+  const lbDown='▼ descente '+tDown.toFixed(3)+' ('+toDb(tDown).toFixed(1)+'dB)';
+  const wDown=oc.measureText(lbDown).width+8;
+  oc.fillStyle='rgba(40,18,0,0.82)'; oc.fillRect(4, yDown+3, wDown, 15);
+  oc.fillStyle='rgba(255,165,0,1)';  oc.fillText(lbDown, 7, yDown+14);
+
+  // ── Label échelle ──
+  oc.font='10px Arial';
+  oc.fillStyle='rgba(140,140,140,0.65)';
+  oc.fillText('RMS (échelle log dB, plancher '+dBmin+'dB)', 6, rmsTop+11);
+
+  updateLegend();
+}
+
+function updateLegend(){
+  document.getElementById('legendBox').innerHTML = phases.map((n,i)=>
+    `<span class="badge" style="background:${colors[i]}">${n}</span>`
+  ).join(' ');
+}
+
+// ── Tableau résultats ──
+function fr(n){ return Number(n).toFixed(1).replace('.',','); }
+
+function renderTable(){
+  const tbody=document.getElementById('rows');
+  tbody.innerHTML=current.map(x=>
+    `<tr>
+      <td>${x.phase}</td>
+      <td class="start">${fr(x.start)}s</td>
+      <td class="end">${fr(x.end)}s</td>
+      <td class="dur">${fr(x.dur)}s</td>
+    </tr>`
+  ).join('');
+  document.getElementById('avgBox').textContent='';
+  updateAvg();
+}
+
+function updateAvg(){
+  const h=hist().slice(0,10);
+  if(!h.length) return;
+  const avg=(h.reduce((a,x)=>a+parseFloat(sum(x.current)),0)/h.length).toFixed(1);
+  document.getElementById('avgBox').textContent='Moyenne 10 dernières : '+avg+' s';
+}
+
+// ── Historique ──
+function hist(){ return JSON.parse(localStorage.getItem('ecamV5')||'[]'); }
+
+function saveAndUpdate(){
+  if(!current.length){ setStatus('Rien à sauvegarder'); return; }
+  let h=hist();
+  h.unshift({
+    date:new Date().toLocaleString('fr-FR'),
+    file:currentFile,
+    comment:document.getElementById('commentaire').value,
+    current
+  });
+  localStorage.setItem('ecamV5', JSON.stringify(h.slice(0,100)));
+  renderHistory(); renderLast();
+  setStatus('✅ Sauvegardé');
+}
+
+function renderHistory(){
+  const h=hist();
+  document.getElementById('hist').innerHTML = h.length
+    ? h.map((x,i)=>`
+      <div class="hist-entry">
+        <strong>${x.date}</strong> — ${x.file} — Total: <strong>${sum(x.current)}s</strong>
+        ${x.comment?'<em> — '+x.comment+'</em>':''}
+        <div style="margin-top:4px">
+          ${x.current.map((p,pi)=>`<span class="badge" style="background:${colors[pi]}">${p.phase} ${fr(p.dur)}s</span>`).join(' ')}
+        </div>
+        <div style="margin-top:4px">
+          <button onclick="loadHist(${i})">📥 Charger</button>
+          <button onclick="delHist(${i})" style="background:#5a1a1a">🗑 Supprimer</button>
+        </div>
+      </div>`).join('')
+    : '<div class="small">Aucun historique</div>';
+}
+
+function renderLast(){
+  const h=hist().slice(0,10);
+  document.getElementById('last').innerHTML=h.map(x=>
+    `<tr>
+      <td>${x.date}</td>
+      <td style="color:#aaa;font-size:11px">${x.file}</td>
+      <td class="dur">${sum(x.current)}s</td>
+      <td style="font-size:11px;color:#aaa">${x.comment||''}</td>
+    </tr>`
+  ).join('');
+  updateAvg();
+}
+
+function sum(arr){ return arr.reduce((a,b)=>a+b.dur,0).toFixed(1); }
+
+function loadHist(i){
+  const x=hist()[i]; if(!x)return;
+  current=x.current;
+  document.getElementById('commentaire').value=x.comment||'';
+  currentFile=x.file;
+  renderTable();
+  renderWave();
+  setStatus('Analyse chargée : '+x.date);
+}
+
+function delHist(i){
+  let h=hist(); h.splice(i,1);
+  localStorage.setItem('ecamV5',JSON.stringify(h));
+  renderHistory(); renderLast();
+}
+
+function clearHistory(){
+  if(!confirm('Vider tout l\'historique ?')) return;
+  localStorage.removeItem('ecamV5');
+  renderHistory(); renderLast();
+}
+
+// ── Export ──
+function copyExcel(){
+  if(!current.length) return;
+  const c=document.getElementById('commentaire').value||'';
+  const header='Fichier\tCommentaire\t'+phases.join('\t');
+  const line=currentFile+'\t'+c+'\t'+current.map(r=>fr(r.dur)).join('\t');
+  navigator.clipboard?.writeText(header+'\n'+line);
+  setStatus('✅ Copié dans le presse-papier');
+}
+
+function exportCSV(){
+  if(!current.length) return;
+  const bom='\uFEFF';
+  const csv=bom+'Phase;Début;Fin;Durée\n'+current.map(r=>`${r.phase};${fr(r.start)};${fr(r.end)};${fr(r.dur)}`).join('\n');
+  const a=document.createElement('a');
+  a.href=URL.createObjectURL(new Blob([csv],{type:'text/csv;charset=utf-8'}));
+  a.download='ecam_v5_'+new Date().toISOString().slice(0,10)+'.csv';
+  a.click();
+}
+
+// ── Reset ──
+function resetAnalysis(){
+  current=[]; waveform=[]; rmsData=[]; rmsNorm=[]; lastBlob=null;
+  const cv=document.getElementById('wave').getContext('2d');
+  cv.clearRect(0,0,1200,220);
+  document.getElementById('rmsOverlay').getContext('2d').clearRect(0,0,1200,220);
+  document.getElementById('rows').innerHTML='';
+  document.getElementById('commentaire').value='';
+  document.getElementById('legendBox').innerHTML='';
+  document.getElementById('avgBox').textContent='';
+  document.getElementById('blocInfo').textContent='';
+  setStatus('Prêt');
+}
+
+function setStatus(m){ document.getElementById('status').textContent=m; }
+
+// ── Init ──
+renderHistory(); renderLast();
+</script>
+</body>
+</html>
