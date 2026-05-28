@@ -1,0 +1,582 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width,initial-scale=1">
+	<title>Analyseur Expresso ECAM V6</title>
+	<style>
+		*{box-sizing:border-box}
+		body{font-family:Arial,sans-serif;background:#121212;color:#eee;margin:0;padding:12px}
+		.card{background:#222;padding:14px;border-radius:14px;margin-bottom:12px}
+		h2{font-size:1.2rem;margin:0 0 10px;color:#c8a97e}
+		h3{font-size:1rem;margin:0 0 10px;color:#c8a97e}
+		button{padding:10px 14px;border:none;border-radius:10px;background:#444;color:#fff;cursor:pointer;margin:4px;font-size:.9rem}
+		button:hover{background:#555}
+		#btnRec{background:#b71c1c;font-weight:bold;width:100%;padding:16px;font-size:1.05rem}
+		#filePick{display:none}
+		canvas{width:100%;background:#111;border-radius:10px;display:block}
+		table{width:100%;border-collapse:collapse}
+		th,td{border-bottom:1px solid #333;padding:7px 6px;font-size:12px}
+		th{color:#c8a97e;background:#1a1a1a}
+		td.dur{font-weight:700;color:#f1c40f;text-align:right}
+		td.start,td.end{color:#aaa;text-align:right}
+		textarea{width:100%;background:#111;color:#eee;border:1px solid #444;border-radius:8px;padding:8px;margin-top:8px;font-size:.9rem}
+		.actions{display:flex;flex-wrap:wrap;gap:4px;margin-top:8px}
+		.small{font-size:12px;color:#aaa;margin-top:6px}
+		.hist-entry{border-bottom:1px solid #333;padding:8px 0;font-size:12px;color:#ccc}
+		.hist-entry button{font-size:11px;padding:5px 8px;background:#333}
+		label{font-size:12px;color:#aaa}
+		input[type=range]{width:100%;accent-color:#c8a97e;margin:4px 0}
+		.seuils-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px 20px;margin-top:6px}
+		#status{margin-top:10px;font-size:.9rem;color:#aaa}
+		.badge{display:inline-block;padding:2px 7px;border-radius:6px;font-size:11px;color:#fff;margin-right:4px}
+		#last tr:hover{background:#1c1c1c}
+		#last td{vertical-align:top}
+		#last .dur{font-size:13px;color:#ffd54f}
+	</style>
+</head>
+<body>
+
+<div class="card">
+	<h2>☕ Analyseur Expresso ECAM V6</h2>
+
+	<button id="btnRec">⏺ Enregistrement live micro</button>
+
+	<div id="recTimer"
+		style="font-size:22px;font-weight:bold;color:#ff5252;margin-top:10px;text-align:center;display:none">
+		00:00
+	</div>
+
+	<canvas id="liveWave"
+		width="1200"
+		height="120"
+		style="width:100%;background:#050505;border-radius:10px;margin-top:10px;display:none">
+	</canvas>
+
+	<div class="actions">
+		<button onclick="document.getElementById('filePick').click()">📂 Fichier audio</button>
+		<input id="filePick" type="file" accept="audio/*,.m4a,.mp3,.wav">
+		<button onclick="resetAnalysis()">🔄 Reset</button>
+		<button onclick="clearHistory()">🗑 Vider historique</button>
+	</div>
+
+	<div id="status">Prêt</div>
+</div>
+
+<div class="card">
+	<h3>⚙️ Seuils RMS</h3>
+
+	<div class="seuils-grid">
+
+		<div>
+			<label>Seuil montée : <strong id="lblUp">0.045</strong></label>
+			<input type="range" id="sUp" min="0.01" max="0.15" step="0.005" value="0.045"
+				oninput="lblUp.textContent=parseFloat(this.value).toFixed(3)">
+		</div>
+
+		<div>
+			<label>Seuil descente : <strong id="lblDown">0.060</strong></label>
+			<input type="range" id="sDown" min="0.01" max="0.15" step="0.005" value="0.060"
+				oninput="lblDown.textContent=parseFloat(this.value).toFixed(3)">
+		</div>
+
+		<div>
+			<label>Gap fusion : <strong id="lblGap">0.35</strong></label>
+			<input type="range" id="sGap" min="0.05" max="1.5" step="0.05" value="0.35"
+				oninput="lblGap.textContent=parseFloat(this.value).toFixed(2)">
+		</div>
+
+		<div>
+			<label>Durée min : <strong id="lblMin">1.0</strong></label>
+			<input type="range" id="sMin" min="0.2" max="3.0" step="0.1" value="1.0"
+				oninput="lblMin.textContent=parseFloat(this.value).toFixed(1)">
+		</div>
+
+	</div>
+
+	<div class="actions">
+		<button onclick="reanalyze()">🔁 Ré-analyser</button>
+	</div>
+</div>
+
+<div class="card">
+	<h3>Waveform coloré par phase</h3>
+
+	<div style="position:relative">
+
+		<canvas id="wave" width="1200" height="220"></canvas>
+
+		<canvas
+			id="rmsOverlay"
+			width="1200"
+			height="220"
+			style="position:absolute;top:0;left:0;width:100%;border-radius:10px;pointer-events:none">
+		</canvas>
+
+	</div>
+
+	<div style="margin-top:6px;display:flex;align-items:center;gap:12px;flex-wrap:wrap">
+
+		<div id="legendBox" style="font-size:11px;flex:1"></div>
+
+		<label style="font-size:12px;display:flex;align-items:center;gap:6px;cursor:pointer">
+			<input type="checkbox" id="chkRms" checked onchange="renderWave()">
+			Courbe RMS + seuils
+		</label>
+
+	</div>
+
+	<div id="blocInfo" style="font-size:12px;color:#aaa;margin-top:4px"></div>
+</div>
+
+<div class="card">
+	<h3>Analyse ECAM — 5 phases</h3>
+
+	<table>
+		<thead>
+			<tr>
+				<th>Phase</th>
+				<th style="text-align:right">Début</th>
+				<th style="text-align:right">Fin</th>
+				<th style="text-align:right">Durée</th>
+			</tr>
+		</thead>
+		<tbody id="rows"></tbody>
+	</table>
+
+	<div id="avgBox" class="small"></div>
+
+	<textarea id="commentaire" rows="2" placeholder="Commentaire"></textarea>
+
+	<div class="actions">
+		<button onclick="saveAndUpdate()">💾 Sauvegarder</button>
+		<button onclick="copyExcel()">📋 Copier Excel</button>
+		<button onclick="exportCSV()">⬇ Export CSV</button>
+	</div>
+</div>
+
+<div class="card">
+	<h3>Historique détaillé</h3>
+	<div id="hist"></div>
+</div>
+
+<script>
+
+	// ── Variables globales ─────────────────────────────────────────
+	let mediaRecorder, recChunks=[], recording=false, recStream=null;
+	let current=[], currentFile='micro', waveform=[], rmsData=[], rmsNorm=[], sampleRate=1, lastBlob=null;
+	let recStartTime=0, recTimerInt=null;
+	let liveAudioCtx=null, analyserNode=null, liveSource=null, liveAnim=null;
+
+	const phases=['Broyage','Compactage','Pré-extraction','Extraction','Éjection'];
+	const colors=['#e53935','#fb8c00','#fdd835','#43a047','#1e88e5'];
+
+	// ── Utilitaires ────────────────────────────────────────────────
+	function setStatus(m){ document.getElementById('status').textContent=m; }
+
+	function fr(n){ return Number(n).toFixed(1).replace('.',','); }
+
+	function sum(arr){
+		if(!Array.isArray(arr)) return '0.0';
+		return arr.reduce((a,b)=>{
+			const v=parseFloat(b?.dur||0);
+			return a+(isNaN(v)?0:v);
+		},0).toFixed(1);
+	}
+
+	function hist(){
+		try{
+			const data=JSON.parse(localStorage.getItem('ecamV5')||'[]');
+			return data.filter(x=>x && Array.isArray(x.current) && x.current.length);
+		}catch(e){ console.error(e); return []; }
+	}
+
+	// ── Waveform live (fenêtre glissante 60 s) ────────────────────
+	function drawLiveWave(){
+		const cv=document.getElementById('liveWave');
+		if(!cv) return;
+		const c=cv.getContext('2d');
+		const W=cv.width, H=cv.height;
+
+		const WINDOW_SEC=60;
+		const SR=liveAudioCtx.sampleRate||44100;
+		const CHUNK=1024;
+		const maxSamples=WINDOW_SEC*SR;
+		const ring=new Float32Array(maxSamples);
+		let ringHead=0, ringFilled=0;
+
+		const tmpArr=new Uint8Array(CHUNK);
+		analyserNode.fftSize=CHUNK;
+
+		function draw(){
+			if(!recording) return;
+			liveAnim=requestAnimationFrame(draw);
+
+			// accumuler dans le ring buffer
+			analyserNode.getByteTimeDomainData(tmpArr);
+			for(let i=0;i<CHUNK;i++){
+				ring[ringHead]=(tmpArr[i]-128)/128.0;
+				ringHead=(ringHead+1)%maxSamples;
+				if(ringFilled<maxSamples) ringFilled++;
+			}
+
+			// fond
+			c.fillStyle='#050505';
+			c.fillRect(0,0,W,H);
+
+			// ligne centrale
+			c.strokeStyle='rgba(255,255,255,0.08)';
+			c.lineWidth=1;
+			c.beginPath(); c.moveTo(0,H/2); c.lineTo(W,H/2); c.stroke();
+
+			// tracé depuis le ring buffer (plus ancien → plus récent)
+			c.lineWidth=1.5;
+			c.strokeStyle='#ff3b30';
+			c.beginPath();
+			const total=ringFilled;
+			const startIdx=(ringHead-total+maxSamples)%maxSamples;
+			for(let px=0;px<W;px++){
+				const si=Math.floor((px/W)*total);
+				const idx=(startIdx+si)%maxSamples;
+				const y=H/2 + ring[idx]*(H/2)*0.9;
+				if(px===0) c.moveTo(0,y); else c.lineTo(px,y);
+			}
+			c.stroke();
+		}
+		draw();
+	}
+
+	// ── Table & légende ────────────────────────────────────────────
+	function updateAvg(){
+		const h=hist().slice(0,10);
+		if(!h.length){ document.getElementById('avgBox').textContent=''; return; }
+		const avg=(h.reduce((a,x)=>a+parseFloat(sum(x.current)),0)/h.length).toFixed(1);
+		document.getElementById('avgBox').textContent='Moyenne 10 dernières : '+avg+' s';
+	}
+
+	function renderTable(){
+		document.getElementById('rows').innerHTML=
+			current.map(x=>`
+			<tr>
+				<td>${x.phase}</td>
+				<td class="start">${fr(x.start)}s</td>
+				<td class="end">${fr(x.end)}s</td>
+				<td class="dur">${fr(x.dur)}s</td>
+			</tr>`).join('');
+		updateAvg();
+	}
+
+	function updateLegend(){
+		document.getElementById('legendBox').innerHTML=
+			phases.map((n,i)=>`<span class="badge" style="background:${colors[i]}">${n}</span>`).join(' ');
+	}
+
+	// ── Waveform ───────────────────────────────────────────────────
+	function renderWave(){
+		const cv=document.getElementById('wave');
+		const W=cv.width, H=cv.height, mid=H/2;
+		const c=cv.getContext('2d');
+		c.clearRect(0,0,W,H);
+
+		const ov=document.getElementById('rmsOverlay');
+		const oc=ov.getContext('2d');
+		oc.clearRect(0,0,W,H);
+
+		if(!waveform.length) return;
+
+		const audioDur=rmsData.length*0.1;
+		const total=waveform.length;
+
+		for(let i=0;i<total;i++){
+			const t=(i/total)*audioDur;
+			let col='#444';
+			if(current.length){
+				for(let p=0;p<current.length;p++){
+					if(t>=current[p].start && t<current[p].end){ col=colors[p]; break; }
+				}
+			}
+			c.strokeStyle=col;
+			const h=waveform[i]*95;
+			c.beginPath(); c.moveTo(i,mid-h); c.lineTo(i,mid+h); c.stroke();
+		}
+
+		if(current.length){
+			current.forEach((ph,i)=>{
+				if(i===0) return;
+				const x=Math.round((ph.start/audioDur)*W);
+				c.strokeStyle='rgba(255,255,255,0.25)';
+				c.lineWidth=1;
+				c.setLineDash([4,4]);
+				c.beginPath(); c.moveTo(x,0); c.lineTo(x,H); c.stroke();
+				c.setLineDash([]);
+			});
+		}
+
+		if(document.getElementById('chkRms').checked){
+			const tUp=parseFloat(document.getElementById('sUp').value);
+			const tDown=parseFloat(document.getElementById('sDown').value);
+			const maxR=Math.max(...rmsNorm,1);
+
+			oc.beginPath();
+			oc.strokeStyle='rgba(220,220,220,0.85)';
+			oc.lineWidth=2;
+			for(let i=0;i<rmsNorm.length;i++){
+				const x=(i/rmsNorm.length)*W;
+				const y=H-(rmsNorm[i]/maxR)*(H*0.8)-10;
+				if(i===0) oc.moveTo(x,y); else oc.lineTo(x,y);
+			}
+			oc.stroke();
+
+			const yUp=H-(tUp/maxR)*(H*0.8)-10;
+			oc.strokeStyle='cyan';
+			oc.setLineDash([8,4]);
+			oc.beginPath(); oc.moveTo(0,yUp); oc.lineTo(W,yUp); oc.stroke();
+
+			const yDown=H-(tDown/maxR)*(H*0.8)-10;
+			oc.strokeStyle='orange';
+			oc.beginPath(); oc.moveTo(0,yDown); oc.lineTo(W,yDown); oc.stroke();
+
+			oc.setLineDash([]);
+		}
+
+		updateLegend();
+	}
+
+	// ── Détection ──────────────────────────────────────────────────
+	function merge(blocks,g){
+		if(!blocks.length) return [];
+		let o=[{...blocks[0]}];
+		for(let i=1;i<blocks.length;i++){
+			let p=o[o.length-1];
+			if(blocks[i].start-p.end<=g) p.end=blocks[i].end;
+			else o.push({...blocks[i]});
+		}
+		return o;
+	}
+
+	function detectPhases(norm,winSec){
+		const tUp=parseFloat(document.getElementById('sUp').value);
+		const tDown=parseFloat(document.getElementById('sDown').value);
+		const gap=parseFloat(document.getElementById('sGap').value);
+		const minDur=parseFloat(document.getElementById('sMin').value);
+
+		let raw=[], active=false, start=0;
+		for(let i=0;i<norm.length;i++){
+			if(!active && norm[i]>tUp){ active=true; start=i*winSec; }
+			if(active && norm[i]<=tDown){ raw.push({start,end:i*winSec}); active=false; }
+		}
+		if(active) raw.push({start,end:norm.length*winSec});
+
+		let blocks=merge(raw,gap).filter(b=>(b.end-b.start)>=minDur);
+		document.getElementById('blocInfo').textContent=`Blocs détectés : ${blocks.length}`;
+
+		if(blocks.length>=5){ blocks=blocks.slice(0,5); }
+		else{ setStatus('⚠️ Détection incomplète'); return; }
+
+		current=blocks.map((b,i)=>({
+			phase:phases[i],
+			start:+b.start.toFixed(2),
+			end:+b.end.toFixed(2),
+			dur:+(b.end-b.start).toFixed(2)
+		}));
+
+		renderWave();
+		renderTable();
+		setStatus('✅ Analyse OK');
+	}
+
+	async function analyze(blob){
+		setStatus('Analyse…');
+		try{
+			const actx=new(window.AudioContext||window.webkitAudioContext)();
+			const decoded=await actx.decodeAudioData(await blob.arrayBuffer());
+			const data=decoded.getChannelData(0);
+			sampleRate=decoded.sampleRate;
+
+			const winSec=0.1;
+			const win=Math.floor(sampleRate*winSec);
+			rmsData=[];
+			for(let i=0;i<data.length;i+=win){
+				let s=0,c=0;
+				for(let j=i;j<i+win && j<data.length;j++){ s+=data[j]*data[j]; c++; }
+				rmsData.push(c?Math.sqrt(s/c):0);
+			}
+
+			const maxR=Math.max(...rmsData)||1;
+			rmsNorm=rmsData.map(v=>v/maxR);
+
+			const step=Math.max(1,Math.floor(data.length/1200));
+			waveform=[];
+			for(let i=0;i<data.length;i+=step) waveform.push(Math.abs(data[i]||0));
+
+			detectPhases(rmsNorm,winSec);
+		}catch(e){ setStatus('Erreur : '+e.message); }
+	}
+
+	function reanalyze(){
+		if(rmsNorm.length) detectPhases(rmsNorm,0.1);
+	}
+
+	// ── Sauvegarde ─────────────────────────────────────────────────
+	function saveAndUpdate(){
+		if(!current.length){ setStatus('Rien à sauvegarder'); return; }
+		let h=hist();
+		h.push({
+			date:new Date().toLocaleString('fr-FR'),
+			file:currentFile,
+			comment:document.getElementById('commentaire').value,
+			current
+		});
+		h.sort((a,b)=>new Date(b.date)-new Date(a.date));
+		localStorage.setItem('ecamV5',JSON.stringify(h.slice(0,100)));
+		renderHistory();
+		setStatus('✅ Sauvegardé');
+	}
+
+	// ── Historique ─────────────────────────────────────────────────
+	function renderHistory(){
+		const h=hist();
+		document.getElementById('hist').innerHTML=h.length
+			? h.map((x,i)=>`
+			<div class="hist-entry">
+				<strong>${x.date}</strong>
+				— ${x.file}
+				— Total : <strong>${sum(x.current)}s</strong>
+				${x.comment ? '<em> — '+x.comment+'</em>' : ''}
+				<div style="margin-top:4px">
+					${x.current.map((p,pi)=>
+						`<span class="badge" style="background:${colors[pi]}">${p.phase} ${fr(p.dur)}s</span>`
+					).join(' ')}
+				</div>
+				<div style="margin-top:4px">
+					<button onclick="loadHist(${i})">📥 Charger</button>
+					<button onclick="delHist(${i})" style="background:#5a1a1a">🗑 Supprimer</button>
+				</div>
+			</div>`).join('')
+			: '<div class="small">Aucun historique</div>';
+	}
+
+	function loadHist(i){
+		const x=hist()[i];
+		if(!x) return;
+		current=x.current;
+		currentFile=x.file;
+		document.getElementById('commentaire').value=x.comment||'';
+		renderTable();
+		renderWave();
+		setStatus('Analyse chargée');
+	}
+
+	function delHist(i){
+		let h=hist();
+		h.splice(i,1);
+		localStorage.setItem('ecamV5',JSON.stringify(h));
+		renderHistory();
+	}
+
+	function clearHistory(){
+		if(!confirm('Vider historique ?')) return;
+		localStorage.removeItem('ecamV5');
+		renderHistory();
+	}
+
+	// ── Export ─────────────────────────────────────────────────────
+	function copyExcel(){
+		if(!current.length) return;
+		const c=document.getElementById('commentaire').value||'';
+		const header='Fichier\tCommentaire\t'+phases.join('\t');
+		const line=currentFile+'\t'+c+'\t'+current.map(r=>fr(r.dur)).join('\t');
+		navigator.clipboard.writeText(header+'\n'+line);
+		setStatus('✅ Copié');
+	}
+
+	function exportCSV(){
+		if(!current.length) return;
+		const csv='Phase;Début;Fin;Durée\n'+
+			current.map(r=>`${r.phase};${fr(r.start)};${fr(r.end)};${fr(r.dur)}`).join('\n');
+		const a=document.createElement('a');
+		a.href=URL.createObjectURL(new Blob([csv],{type:'text/csv;charset=utf-8'}));
+		a.download='ecam_v52.csv';
+		a.click();
+	}
+
+	// ── Reset ──────────────────────────────────────────────────────
+	function resetAnalysis(){
+		current=[]; waveform=[]; rmsData=[]; rmsNorm=[];
+		document.getElementById('rows').innerHTML='';
+		document.getElementById('commentaire').value='';
+		document.getElementById('blocInfo').textContent='';
+		document.getElementById('wave').getContext('2d').clearRect(0,0,1200,220);
+		document.getElementById('rmsOverlay').getContext('2d').clearRect(0,0,1200,220);
+		setStatus('Prêt');
+	}
+
+	// ── Enregistrement ─────────────────────────────────────────────
+	document.getElementById('btnRec').onclick=async()=>{
+
+		if(recording){
+			mediaRecorder.stop();
+			if(recStream) recStream.getTracks().forEach(t=>t.stop());
+			clearInterval(recTimerInt);
+			document.getElementById('recTimer').style.display='none';
+			cancelAnimationFrame(liveAnim);
+			document.getElementById('liveWave').style.display='none';
+			if(liveAudioCtx) liveAudioCtx.close();
+			recording=false;
+			document.getElementById('btnRec').textContent='⏺ Enregistrement live micro';
+			return;
+		}
+
+		try{
+			recStream=await navigator.mediaDevices.getUserMedia({
+				audio:{channelCount:1,echoCancellation:false,noiseSuppression:false,autoGainControl:false}
+			});
+		}catch(e){ setStatus('Micro refusé : '+e.message); return; }
+
+		recChunks=[];
+		recStartTime=Date.now();
+		document.getElementById('recTimer').style.display='block';
+		recTimerInt=setInterval(()=>{
+			const t=Math.floor((Date.now()-recStartTime)/1000);
+			const m=String(Math.floor(t/60)).padStart(2,'0');
+			const s=String(t%60).padStart(2,'0');
+			document.getElementById('recTimer').textContent=`${m}:${s}`;
+		},200);
+
+		document.getElementById('liveWave').style.display='block';
+		liveAudioCtx=new(window.AudioContext||window.webkitAudioContext)();
+		if(liveAudioCtx.state==='suspended') await liveAudioCtx.resume();
+		analyserNode=liveAudioCtx.createAnalyser();
+		analyserNode.fftSize=2048;
+		analyserNode.smoothingTimeConstant=0.5;
+		liveSource=liveAudioCtx.createMediaStreamSource(recStream);
+		liveSource.connect(analyserNode);
+		const mime=['audio/webm;codecs=opus','audio/webm',''].find(m=>!m||MediaRecorder.isTypeSupported(m));
+		mediaRecorder=new MediaRecorder(recStream,mime?{mimeType:mime}:undefined);
+		mediaRecorder.ondataavailable=e=>{ if(e.data.size) recChunks.push(e.data); };
+		mediaRecorder.onstop=()=>{
+			lastBlob=new Blob(recChunks,{type:mediaRecorder.mimeType||'audio/webm'});
+			analyze(lastBlob);
+		};
+		mediaRecorder.start(200);
+
+		recording=true;   // AVANT drawLiveWave — sinon if(!recording) stoppe la boucle au 1er appel
+		setStatus('Enregistrement…');
+		document.getElementById('btnRec').textContent='⏹ Arrêter';
+		drawLiveWave();
+	};
+
+	document.getElementById('filePick').onchange=()=>{
+		const f=document.getElementById('filePick').files[0];
+		if(!f) return;
+		currentFile=f.name;
+		lastBlob=f;
+		analyze(f);
+	};
+
+	// ── Init ───────────────────────────────────────────────────────
+	renderHistory();
+
+</script>
+</body>
+</html>
